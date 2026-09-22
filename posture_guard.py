@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from collections import deque
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +29,13 @@ CONFIG_DIR = Path.home() / "Library" / "Application Support" / "PostureGuard"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history.db"
 
+# Moving your chair/laptop shifts where you sit in the frame; slouching barely does.
+MOVED_SHIFT = 0.10        # shoulder centre moved by this fraction of the frame width/height
+MOVED_SCALE = 0.25        # or you're this much closer/further (shoulder width change)
+MOVED_AFTER_RETURN = 5.0  # seconds of a changed position after coming back before asking
+MOVED_WHILE_SEATED = 30.0 # seconds of a changed position otherwise (e.g. laptop nudged)
+AWAY_FOR_RETURN = 15.0    # seconds out of frame that count as "stood up and came back"
+
 DEFAULTS = {
     "camera": None,        # None = pick the Mac's built-in camera
     "sensitivity": 0.15,
@@ -36,10 +43,11 @@ DEFAULTS = {
     "grace": 10.0,
     "cooldown": 15.0,
     "calibrate": 4.0,
-    "remind_every": 30.0,
+    "remind_every": 15.0,
     "break_every": 45.0,
     "away_reset": 120.0,
     "fps": 8.0,
+    "timer_only": False,   # menu bar app: camera off, timed reminders only
 }
 
 
@@ -69,6 +77,8 @@ class Metrics:
     lean: float        # shoulder width / frame width. Grows when leaning in toward the screen.
     tilt: float        # shoulder line angle in degrees. Drifts when slumping to one side.
     head_ratio: float  # ear span / shoulder width. Grows when the shoulders round inward.
+    center_x: float    # shoulder midpoint as a fraction of frame width. Used to notice a moved chair/camera.
+    center_y: float    # shoulder midpoint as a fraction of frame height.
 
 
 def extract_metrics(landmarks, width, height, min_visibility=0.5):
@@ -93,12 +103,20 @@ def extract_metrics(landmarks, width, height, min_visibility=0.5):
         lean=shoulder_w / width,
         tilt=math.degrees(math.atan2(lsy - rsy, lsx - rsx)),
         head_ratio=math.hypot(lex - rex, ley - rey) / shoulder_w,
+        center_x=(lsx + rsx) / 2 / width,
+        center_y=(lsy + rsy) / 2 / height,
     )
 
 
 def average(samples):
-    return Metrics(*(statistics.median(getattr(s, f) for s in samples)
-                     for f in ("neck", "lean", "tilt", "head_ratio")))
+    return Metrics(*(statistics.median(getattr(s, f.name) for s in samples) for f in fields(Metrics)))
+
+
+def position_changed(current, baseline):
+    """True if you're sitting somewhere different in the frame than when you calibrated."""
+    return (abs(current.center_x - baseline.center_x) > MOVED_SHIFT
+            or abs(current.center_y - baseline.center_y) > MOVED_SHIFT
+            or abs(current.lean / baseline.lean - 1) > MOVED_SCALE)
 
 
 def find_problems(current, baseline, sensitivity, tilt_limit):
@@ -160,8 +178,9 @@ def save_baseline(baseline, camera):
 # ---------------------------------------------------------------- engine
 
 class PostureGuard:
-    def __init__(self, settings, baseline=None, on_calibrated=None, history=None):
+    def __init__(self, settings, baseline=None, on_calibrated=None, history=None, on_moved=None):
         self.args = settings
+        self.on_moved = on_moved  # called (from the camera thread) when your position seems to have changed
         self.history = history
         self.pose = mp.solutions.pose.Pose(model_complexity=0,
                                            min_detection_confidence=0.5,
@@ -171,7 +190,7 @@ class PostureGuard:
         self.calib_samples = []
         self.calib_until = None
         self.recent = deque(maxlen=max(1, int(settings.fps * 1.5)))  # ~1.5s smoothing window
-        self.state = "starting"  # starting | calibrating | good | bad | away | paused
+        self.state = "starting"  # starting | calibrating | good | bad | away | paused | moved
 
         now = time.time()
         self.bad_since = None
@@ -180,6 +199,10 @@ class PostureGuard:
         self.sitting_since = now
         self.last_posture_reminder = now
         self.paused = False
+        self.returned_at = None     # when you came back after being away
+        self.moved_since = None     # when your position first looked different from calibration
+        self.moved_prompted = False # already asked about this position change
+        self.moved = False          # waiting on an answer; slouch alerts are held meanwhile
 
         self.good_seconds = 0.0
         self.bad_seconds = 0.0
@@ -192,6 +215,8 @@ class PostureGuard:
         self.calib_until = time.time() + self.args.calibrate
         self.recent.clear()
         self.bad_since = None
+        self.dismiss_moved()
+        self.moved_prompted = False
         notify("Posture Guard: calibrating",
                f"Sit up straight and look at the screen for {self.args.calibrate:.0f} seconds.", sound="Tink")
 
@@ -213,6 +238,30 @@ class PostureGuard:
         if self.on_calibrated:
             self.on_calibrated(self.baseline)
 
+    def dismiss_moved(self):
+        """Keep the current calibration; don't ask again until you next step away."""
+        self.moved = False
+        self.moved_since = None
+
+    def _check_moved(self, metrics, now):
+        if self.moved or self.moved_prompted:
+            return
+        if not position_changed(metrics, self.baseline):
+            self.moved_since = None
+            return
+        self.moved_since = self.moved_since or now
+        just_returned = self.returned_at is not None and now - self.returned_at < 30
+        if now - self.moved_since >= (MOVED_AFTER_RETURN if just_returned else MOVED_WHILE_SEATED):
+            self.moved = self.moved_prompted = True
+            self.bad_since = None
+            print("Position changed since calibration.", flush=True)
+            if self.on_moved:
+                self.on_moved()
+            else:
+                notify("Did you move your chair or laptop?",
+                       "Sit up straight and press c in the preview window to recalibrate.", sound="Glass")
+                self.moved = False
+
     # ---- per-frame logic
     def step(self, frame, dt):
         """Process one frame (None while paused). Returns (status_text, color, landmarks)."""
@@ -228,9 +277,14 @@ class PostureGuard:
         metrics = extract_metrics(result.pose_landmarks, w, h) if result.pose_landmarks else None
 
         if metrics:
-            if now - self.last_seen > self.args.away_reset:
+            away_for = now - self.last_seen
+            if away_for > self.args.away_reset:
                 # They were away long enough to count as a break.
                 self.sitting_since = now
+            if away_for > AWAY_FOR_RETURN:
+                self.returned_at = now
+                self.moved_prompted = False  # a new sitting position is worth asking about again
+                self.moved_since = None
             self.last_seen = now
 
         if self.calib_until:
@@ -248,8 +302,13 @@ class PostureGuard:
             return "No one detected", (160, 160, 160), result.pose_landmarks
 
         self.recent.append(metrics)
-        problems = find_problems(average(self.recent), self.baseline,
-                                 self.args.sensitivity, self.args.tilt)
+        smoothed = average(self.recent)
+        self._check_moved(smoothed, now)
+        if self.moved:
+            self.state = "moved"
+            return "Position changed: recalibrate?", (255, 200, 0), result.pose_landmarks
+
+        problems = find_problems(smoothed, self.baseline, self.args.sensitivity, self.args.tilt)
 
         if not problems:
             self.state = "good"

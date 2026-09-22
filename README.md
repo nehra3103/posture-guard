@@ -17,7 +17,7 @@ Everything runs locally on your machine. No video is saved or uploaded.
 3. **Alerts.** If bad posture lasts 10 seconds, you get a macOS notification, then again every 15 seconds while you stay slouched.
 4. **Timers.**
    - A **stretch break** reminder after 45 minutes of continuous sitting. Being away from the desk for 2+ minutes resets it.
-   - A **posture check** reminder every 30 minutes, but only when the camera isn't tracking (paused, `--no-camera`, or camera unavailable).
+   - A **posture check** reminder every 15 minutes (adjustable), but only when the camera isn't tracking (Timed Reminders Only mode, paused, `--no-camera`, or camera unavailable).
 
 ## Setup
 
@@ -38,10 +38,15 @@ Open **Posture Guard** from Spotlight (Cmd+Space). There's no window or Dock ico
 |---|---|
 | 🟢 | Good posture |
 | 🔴 | Slouching |
-| 🟡 | Calibrating: sit up straight |
+| 🟡 | Calibrating, or asking to recalibrate |
 | ⚪ | Nobody at the desk |
 | ⏸ | Paused (camera off) |
-| ⚠️ | Camera unavailable (timer reminders only) |
+| ⚠️ | Camera unavailable (timed reminders only) |
+| ⏰ | Timed reminders only (camera off) |
+
+**Timed Reminders Only** turns the camera off completely and just sends a posture reminder at the interval you pick under **Timed Reminder Interval** (5–60 min, default 15). The same interval is used while you're paused or the camera is unavailable.
+
+**Moved your chair?** Calibration remembers where you sit in the frame. If you come back from a break and you're sitting somewhere clearly different (shifted sideways/up/down, or much closer or further away), Posture Guard holds slouch alerts and asks whether to recalibrate. It also asks if your position stays different for 30 seconds while you're seated, for example after nudging the laptop.
 
 Click the icon to see today's stats, open the progress report, pause (for calls), recalibrate, show the camera preview, change sensitivity and alert timing, turn stretch breaks on or off, and toggle **Start at Login**. Settings you change there are remembered.
 
@@ -87,7 +92,7 @@ Flags override the settings saved by the menu bar app, but only for that run.
 | `--cooldown` | 15 | Minimum seconds between alerts |
 | `--tilt` | 8 | Degrees of shoulder tilt allowed |
 | `--break-every` | 45 | Minutes of sitting before a stretch break (0 = off) |
-| `--remind-every` | 30 | Minutes between fallback posture reminders (0 = off) |
+| `--remind-every` | 15 | Minutes between fallback posture reminders (0 = off) |
 | `--fps` | 8 | Frames analysed per second (lower uses less CPU) |
 
 ## Tips for accurate detection

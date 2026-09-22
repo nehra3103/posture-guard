@@ -33,11 +33,12 @@ LOG_PATH = Path.home() / "Library" / "Logs" / "PostureGuard.log"
 PREVIEW_WINDOW = "Posture Guard"
 
 ICONS = {"starting": "⚪", "calibrating": "🟡", "good": "🟢", "bad": "🔴",
-         "away": "⚪", "paused": "⏸", "no_camera": "⚠️"}
+         "away": "⚪", "paused": "⏸", "no_camera": "⚠️", "timer": "⏰", "moved": "🟡"}
 
 SENSITIVITY = [("Strict", 0.10), ("Normal", 0.15), ("Relaxed", 0.22)]
 FIRST_ALERT = [("5 seconds", 5.0), ("10 seconds", 10.0), ("20 seconds", 20.0), ("30 seconds", 30.0)]
 REPEAT_ALERT = [("10 seconds", 10.0), ("15 seconds", 15.0), ("30 seconds", 30.0), ("1 minute", 60.0)]
+REMINDERS = [(f"Every {m} min", float(m)) for m in (5, 10, 15, 20, 30, 45, 60)]
 BREAKS = [("Off", 0.0), ("Every 30 min", 30.0), ("Every 45 min", 45.0), ("Every 60 min", 60.0)]
 
 
@@ -53,14 +54,15 @@ class PostureGuardApp(rumps.App):
         self.history = History(pg.HISTORY_FILE)
         self.guard = pg.PostureGuard(self.settings, pg.load_baseline(cfg, self.camera),
                                      on_calibrated=lambda b: pg.save_baseline(b, self.camera),
-                                     history=self.history)
+                                     history=self.history, on_moved=self.ask_recalibrate)
         self.today_checked = 0.0
 
         self.state = "starting"
         self.status = "Starting camera…"
         self.frame = None
         self.show_preview = False
-        self.stop = threading.Event()
+        self.stop = threading.Event()    # app is quitting
+        self.switch = threading.Event()  # camera/timer mode changed; restart the worker loop
 
         self.status_item = rumps.MenuItem(self.status)
         self.today_item = rumps.MenuItem("Today: no data yet")
@@ -69,6 +71,8 @@ class PostureGuardApp(rumps.App):
         self.preview_item = rumps.MenuItem("Show Camera Preview", callback=self.toggle_preview)
         self.login_item = rumps.MenuItem("Start at Login", callback=self.toggle_login)
         self.login_item.state = AGENT_PATH.exists()
+        self.timer_item = rumps.MenuItem("Timed Reminders Only (camera off)", callback=self.toggle_timer_only)
+        self.timer_item.state = self.settings.timer_only
 
         self.menu = [
             self.status_item,
@@ -80,6 +84,9 @@ class PostureGuardApp(rumps.App):
             self.pause_item,
             rumps.MenuItem("Recalibrate (sit up straight)", callback=self.recalibrate),
             self.preview_item,
+            None,
+            self.timer_item,
+            self.choice_menu("Timed Reminder Interval", "remind_every", REMINDERS),
             None,
             self.choice_menu("Sensitivity", "sensitivity", SENSITIVITY),
             self.choice_menu("First Alert After", "grace", FIRST_ALERT),
@@ -114,7 +121,7 @@ class PostureGuardApp(rumps.App):
             menu.add(item)
         return menu
 
-    # ---- background camera thread
+    # ---- background worker thread
     def camera_worker(self):
         def on_frame(frame, status, color, landmarks):
             self.state, self.status = self.guard.state, status
@@ -123,16 +130,51 @@ class PostureGuardApp(rumps.App):
                                              hint="Use the menu bar icon to pause or recalibrate")
             return True
 
-        ok = pg.run_camera(self.guard, self.settings, on_frame, stop=self.stop, release_when_paused=True)
-        if ok or self.stop.is_set():
-            return
-        self.state = "no_camera"
-        self.status = "Camera unavailable: timer reminders only"
-        pg.notify("Posture Guard can't use the camera",
-                  "Allow it in System Settings > Privacy & Security > Camera, then restart Posture Guard.")
         while not self.stop.is_set():
-            self.guard._timers(time.time(), tracking=False)
-            self.stop.wait(5)
+            self.switch.clear()
+            if self.settings.timer_only:
+                self.timer_loop()
+                continue
+            self.state, self.status = "starting", "Starting camera…"
+            ok = pg.run_camera(self.guard, self.settings, on_frame, stop=self.switch, release_when_paused=True)
+            if ok or self.switch.is_set():
+                continue  # stopped on purpose: quitting or switching mode
+            self.state = "no_camera"
+            self.status = "Camera unavailable: timed reminders only"
+            pg.notify("Posture Guard can't use the camera",
+                      "Allow it in System Settings > Privacy & Security > Camera, then restart Posture Guard.")
+            while not self.switch.is_set():
+                self.guard._timers(time.time(), tracking=False)
+                self.switch.wait(5)
+
+    def timer_loop(self):
+        """Camera off: a posture reminder every N minutes (plus stretch breaks)."""
+        self.guard.last_posture_reminder = time.time()
+        while not self.switch.is_set():
+            now = time.time()
+            if self.guard.paused:
+                self.state, self.status = "paused", "Paused"
+                self.guard.last_posture_reminder = now
+            else:
+                self.guard._timers(now, tracking=False)
+                left = self.settings.remind_every * 60 - (now - self.guard.last_posture_reminder)
+                self.state = "timer"
+                self.status = f"Timed reminders: next in {max(1, round(left / 60))} min"
+            self.switch.wait(2)
+
+    def ask_recalibrate(self):
+        """Called from the camera thread when your sitting position looks different."""
+        def ask():
+            subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
+            script = ('display dialog "It looks like you moved your chair or laptop.\n\n'
+                      'Sit up straight, then click Recalibrate." with title "Posture Guard" with icon note '
+                      'buttons {"Keep Current", "Recalibrate"} default button "Recalibrate" giving up after 120')
+            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+            if "button returned:Recalibrate" in result.stdout:
+                self.guard.start_calibration()
+            else:
+                self.guard.dismiss_moved()
+        threading.Thread(target=ask, daemon=True).start()
 
     # ---- main-thread UI updates
     def refresh_menu(self, _):
@@ -169,8 +211,25 @@ class PostureGuardApp(rumps.App):
         self.guard.paused = not self.guard.paused
 
     def recalibrate(self, _):
+        if self.settings.timer_only:
+            pg.notify("Posture Guard", "Turn off Timed Reminders Only to use the camera.")
+            return
         self.guard.paused = False
         self.guard.start_calibration()
+
+    def toggle_timer_only(self, item):
+        item.state = self.settings.timer_only = not item.state
+        cfg = pg.load_config()
+        cfg.setdefault("settings", {})["timer_only"] = self.settings.timer_only
+        pg.save_config(cfg)
+        if self.settings.timer_only:
+            if self.show_preview:
+                self.toggle_preview(self.preview_item)
+            pg.notify("Timed reminders only",
+                      f"Camera off. You'll get a posture reminder every {self.settings.remind_every:g} min.", sound="Tink")
+        else:
+            pg.notify("Posture Guard", "Camera on. Watching your posture again.", sound="Tink")
+        self.switch.set()
 
     def toggle_preview(self, item):
         self.show_preview = item.state = not item.state
@@ -190,6 +249,7 @@ class PostureGuardApp(rumps.App):
 
     def quit(self, _):
         self.stop.set()
+        self.switch.set()
         cv2.destroyAllWindows()
         time.sleep(0.3)  # let the camera thread finish its current frame
         self.history.close()
