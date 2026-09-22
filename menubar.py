@@ -8,6 +8,7 @@
 
 import argparse
 import fcntl
+import math
 import plistlib
 import shlex
 import shutil
@@ -19,7 +20,9 @@ from pathlib import Path
 
 import cv2
 import rumps
-from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered, NSColor,
+                    NSScreen, NSScreenSaverWindowLevel, NSWindow, NSWindowStyleMaskBorderless)
+from PyObjCTools import AppHelper
 
 import posture_guard as pg
 import report
@@ -33,13 +36,36 @@ LOG_PATH = Path.home() / "Library" / "Logs" / "PostureGuard.log"
 PREVIEW_WINDOW = "Posture Guard"
 
 ICONS = {"starting": "⚪", "calibrating": "🟡", "good": "🟢", "bad": "🔴",
-         "away": "⚪", "paused": "⏸", "no_camera": "⚠️", "timer": "⏰", "moved": "🟡"}
+         "away": "⚪", "paused": "⏸", "no_camera": "⚠️", "timer": "⏰", "moved": "🟡", "break": "🧘"}
 
 SENSITIVITY = [("Strict", 0.10), ("Normal", 0.15), ("Relaxed", 0.22)]
 FIRST_ALERT = [("5 seconds", 5.0), ("10 seconds", 10.0), ("20 seconds", 20.0), ("30 seconds", 30.0)]
 REPEAT_ALERT = [("10 seconds", 10.0), ("15 seconds", 15.0), ("30 seconds", 30.0), ("1 minute", 60.0)]
 REMINDERS = [(f"Every {m} min", float(m)) for m in (5, 10, 15, 20, 30, 45, 60)]
+DISTANCES = [("Off", 0.0), ("Closer than 40 cm", 40.0), ("Closer than 45 cm", 45.0), ("Closer than 50 cm", 50.0)]
 BREAKS = [("Off", 0.0), ("Every 30 min", 30.0), ("Every 45 min", 45.0), ("Every 60 min", 60.0)]
+
+# Guided stretch: (name, instruction, seconds). About 75 seconds in total.
+ROUTINE = [
+    ("Stand up", "Stand up and take a step back from your desk.", 5),
+    ("Chin tucks", "Pull your chin straight back (make a double chin), hold 2 seconds, release. Repeat.", 15),
+    ("Shoulder rolls", "Roll your shoulders up, back and down, slowly.", 15),
+    ("Chest opener", "Clasp your hands behind your back, squeeze your shoulder blades and lift your chest.", 20),
+    ("Look far away", "Look at something at least 20 feet away and blink slowly.", 20),
+]
+
+
+def osascript_dialog(text, buttons, default, timeout):
+    """Show a dialog and return the button pressed ('' if it timed out)."""
+    quote = lambda t: '"' + t.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    script = (f"display dialog {quote(text)} with title \"Posture Guard\" with icon note "
+              f"buttons {{{', '.join(quote(b) for b in buttons)}}} default button {quote(default)} "
+              f"giving up after {timeout}")
+    out = subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout
+    for b in buttons:
+        if f"button returned:{b}," in out + ",":
+            return b
+    return ""
 
 
 class PostureGuardApp(rumps.App):
@@ -54,7 +80,8 @@ class PostureGuardApp(rumps.App):
         self.history = History(pg.HISTORY_FILE)
         self.guard = pg.PostureGuard(self.settings, pg.load_baseline(cfg, self.camera),
                                      on_calibrated=lambda b: pg.save_baseline(b, self.camera),
-                                     history=self.history, on_moved=self.ask_recalibrate)
+                                     history=self.history, on_moved=self.ask_recalibrate,
+                                     on_alert=self.send_alert, on_break=self.offer_break)
         self.today_checked = 0.0
 
         self.state = "starting"
@@ -63,6 +90,9 @@ class PostureGuardApp(rumps.App):
         self.show_preview = False
         self.stop = threading.Event()    # app is quitting
         self.switch = threading.Event()  # camera/timer mode changed; restart the worker loop
+        self.routine_status = None       # set while a guided stretch is running
+        self.dialog_open = False
+        self.flash_windows = []
 
         self.status_item = rumps.MenuItem(self.status)
         self.today_item = rumps.MenuItem("Today: no data yet")
@@ -73,9 +103,25 @@ class PostureGuardApp(rumps.App):
         self.login_item.state = AGENT_PATH.exists()
         self.timer_item = rumps.MenuItem("Timed Reminders Only (camera off)", callback=self.toggle_timer_only)
         self.timer_item.state = self.settings.timer_only
+        self.eye_item = rumps.MenuItem("")
+
+        settings = rumps.MenuItem("Settings")
+        for item in (
+            self.choice_menu("Sensitivity", "sensitivity", SENSITIVITY),
+            self.choice_menu("First Alert After", "grace", FIRST_ALERT),
+            self.choice_menu("Repeat Alert Every", "cooldown", REPEAT_ALERT),
+            self.choice_menu("Stretch Breaks", "break_every", BREAKS),
+            self.choice_menu("Too-Close Warning", "min_distance", DISTANCES),
+            None,
+            self.toggle_item("Escalating Alerts (louder, then screen flash)", "escalate"),
+            self.toggle_item("Mute Alerts During Calls", "mute_in_calls"),
+            self.toggle_item("Eye Care (blinks & screen distance)", "eye_care"),
+        ):
+            settings.add(item if item is not None else rumps.separator)
 
         self.menu = [
             self.status_item,
+            self.eye_item,
             None,
             self.today_item,
             self.streak_item,
@@ -84,14 +130,12 @@ class PostureGuardApp(rumps.App):
             self.pause_item,
             rumps.MenuItem("Recalibrate (sit up straight)", callback=self.recalibrate),
             self.preview_item,
+            rumps.MenuItem("Stretch Now (1 min)", callback=lambda _: self.start_routine()),
             None,
             self.timer_item,
             self.choice_menu("Timed Reminder Interval", "remind_every", REMINDERS),
             None,
-            self.choice_menu("Sensitivity", "sensitivity", SENSITIVITY),
-            self.choice_menu("First Alert After", "grace", FIRST_ALERT),
-            self.choice_menu("Repeat Alert Every", "cooldown", REPEAT_ALERT),
-            self.choice_menu("Stretch Breaks", "break_every", BREAKS),
+            settings,
             None,
             self.login_item,
             rumps.MenuItem("Quit Posture Guard", callback=self.quit),
@@ -102,18 +146,30 @@ class PostureGuardApp(rumps.App):
         rumps.Timer(self.refresh_preview, 1 / 15).start()
 
     # ---- settings
+    def save_setting(self, key, value):
+        setattr(self.settings, key, value)
+        cfg = pg.load_config()
+        cfg.setdefault("settings", {})[key] = value
+        pg.save_config(cfg)
+
+    def toggle_item(self, title, key):
+        """A checkbox menu item bound to an on/off setting."""
+        def flip(item):
+            item.state = not item.state
+            self.save_setting(key, bool(item.state))
+        item = rumps.MenuItem(title, callback=flip)
+        item.state = bool(getattr(self.settings, key))
+        return item
+
     def choice_menu(self, title, key, options):
         """A submenu of radio-style choices that updates a setting live and remembers it."""
         menu = rumps.MenuItem(title)
         values = dict(options)
 
         def pick(item):
-            setattr(self.settings, key, values[item.title])
             for child in menu.values():
                 child.state = child.title == item.title
-            cfg = pg.load_config()
-            cfg.setdefault("settings", {})[key] = values[item.title]
-            pg.save_config(cfg)
+            self.save_setting(key, values[item.title])
 
         for label, value in options:
             item = rumps.MenuItem(label, callback=pick)
@@ -127,7 +183,8 @@ class PostureGuardApp(rumps.App):
             self.state, self.status = self.guard.state, status
             if self.show_preview and frame is not None:
                 self.frame = pg.draw_overlay(frame, status, color, landmarks,
-                                             hint="Use the menu bar icon to pause or recalibrate")
+                                             hint="Use the menu bar icon to pause or recalibrate",
+                                             info=self.guard.eye_info())
             return True
 
         while not self.stop.is_set():
@@ -162,15 +219,93 @@ class PostureGuardApp(rumps.App):
                 self.status = f"Timed reminders: next in {max(1, round(left / 60))} min"
             self.switch.wait(2)
 
+    def send_alert(self, title, message, sound, flash):
+        """Engine alert hook (camera thread): notification + sound, and a screen flash at the top level."""
+        pg.notify(title, message, sound=sound)
+        if flash:
+            AppHelper.callAfter(self.flash_screen)
+
+    def flash_screen(self):
+        """Pulse a soft red tint over every screen twice (main thread). Clicks pass straight through."""
+        self.flash_windows = []
+        for screen in NSScreen.screens():
+            w = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                screen.frame(), NSWindowStyleMaskBorderless, NSBackingStoreBuffered, False)
+            w.setBackgroundColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(0.85, 0.2, 0.15, 1.0))
+            w.setOpaque_(False)
+            w.setAlphaValue_(0.0)
+            w.setIgnoresMouseEvents_(True)
+            w.setLevel_(NSScreenSaverWindowLevel)
+            w.setCollectionBehavior_((1 << 0) | (1 << 8))  # all Spaces, over full-screen apps
+            w.setReleasedWhenClosed_(False)
+            w.orderFrontRegardless()
+            self.flash_windows.append(w)
+
+        def set_alpha(a):
+            for w in self.flash_windows:
+                w.setAlphaValue_(a)
+
+        for i, alpha in enumerate((0.22, 0.0, 0.22, 0.0)):  # two slow pulses (well under 3 flashes/s)
+            AppHelper.callLater(0.4 * i, set_alpha, alpha)
+        AppHelper.callLater(1.8, lambda: [w.orderOut_(None) for w in self.flash_windows])
+
+    def offer_break(self):
+        """Engine hook when a stretch break is due: ask, then run the guided routine."""
+        if self.dialog_open or self.routine_status:
+            return
+
+        def ask():
+            self.dialog_open = True
+            try:
+                subprocess.Popen(["afplay", "/System/Library/Sounds/Hero.aiff"])
+                choice = osascript_dialog(
+                    f"You've been sitting for {self.settings.break_every:g} minutes. "
+                    "Time for a 1-minute stretch: it resets your posture and rests your eyes.",
+                    ["Skip", "Snooze 10 min", "Start Stretch"], "Start Stretch", 300)
+            finally:
+                self.dialog_open = False
+            if choice == "Start Stretch":
+                self.start_routine()
+            elif choice == "Snooze 10 min":
+                self.guard.sitting_since = time.time() - (self.settings.break_every - 10) * 60
+        threading.Thread(target=ask, daemon=True).start()
+
+    def start_routine(self):
+        if self.routine_status:
+            return
+
+        def run():
+            total = sum(s for *_, s in ROUTINE)
+            self.guard.start_break(total + 10)  # a little extra to sit back down
+            try:
+                for i, (name, text, seconds) in enumerate(ROUTINE, 1):
+                    pg.notify(f"Stretch {i}/{len(ROUTINE)}: {name}", text, sound="Glass")
+                    end = time.time() + seconds
+                    while time.time() < end and not self.stop.is_set():
+                        self.routine_status = f"Stretch {i}/{len(ROUTINE)}: {name} ({max(1, math.ceil(end - time.time()))}s)"
+                        time.sleep(0.5)
+                    if self.stop.is_set():
+                        return
+                self.routine_status = "Stretch done: sit back down"
+                time.sleep(8)
+            finally:
+                self.routine_status = None
+                self.guard.end_break()
+            if self.guard.stood_up is False:
+                message = "Nice. Next time try standing up for it, it does more for your back."
+            else:
+                message = "Nice work. Your back and eyes thank you."
+            pg.notify("Stretch break done", message, sound="Hero")
+        threading.Thread(target=run, daemon=True).start()
+
     def ask_recalibrate(self):
-        """Called from the camera thread when your sitting position looks different."""
+        """Engine hook (camera thread) when your sitting position looks different from calibration."""
         def ask():
             subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"])
-            script = ('display dialog "It looks like you moved your chair or laptop.\n\n'
-                      'Sit up straight, then click Recalibrate." with title "Posture Guard" with icon note '
-                      'buttons {"Keep Current", "Recalibrate"} default button "Recalibrate" giving up after 120')
-            result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
-            if "button returned:Recalibrate" in result.stdout:
+            choice = osascript_dialog("It looks like you moved your chair or laptop.\n\n"
+                                      "Sit up straight, then click Recalibrate.",
+                                      ["Keep Current", "Recalibrate"], "Recalibrate", 120)
+            if choice == "Recalibrate":
                 self.guard.start_calibration()
             else:
                 self.guard.dismiss_moved()
@@ -178,8 +313,17 @@ class PostureGuardApp(rumps.App):
 
     # ---- main-thread UI updates
     def refresh_menu(self, _):
-        self.title = ICONS.get(self.state, "⚪")
-        self.status_item.title = self.status
+        if self.routine_status:
+            self.title, status = ICONS["break"], self.routine_status
+        else:
+            self.title, status = ICONS.get(self.state, "⚪"), self.status
+        if self.guard.in_call and self.settings.mute_in_calls:
+            status += "  ·  🔇 alerts muted (on a call)"
+        self.status_item.title = status
+        info = self.guard.eye_info() if not self.settings.timer_only else ""
+        self.eye_item.title = f"👁 {info}" if info else ("👁 Eye care: looking for your face…"
+                                                         if self.settings.eye_care and not self.settings.timer_only
+                                                         else "")
         self.pause_item.title = "Resume" if self.guard.paused else "Pause"
         if time.time() - self.today_checked >= 10:
             self.today_checked = time.time()

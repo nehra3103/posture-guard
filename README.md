@@ -43,6 +43,23 @@ Open **Posture Guard** from Spotlight (Cmd+Space). There's no window or Dock ico
 | ⏸ | Paused (camera off) |
 | ⚠️ | Camera unavailable (timed reminders only) |
 | ⏰ | Timed reminders only (camera off) |
+| 🧘 | Guided stretch in progress |
+
+### Smarter alerts
+
+- **Escalation.** The first slouch alert is gentle (soft sound). If you ignore it, the next one is louder, and after that the screen pulses a soft red twice. Sitting up properly for 5 seconds resets it. You can turn this off under Settings → Escalating Alerts.
+- **Muted during calls.** While any app is using a microphone (Zoom, Meet, FaceTime, Teams, Discord…), alerts stay silent and stretch breaks wait until the call ends. Your posture is still tracked, and the menu shows 🔇.
+- **Guided stretch breaks.** When a break is due, a dialog offers **Start Stretch**, **Snooze 10 min** or **Skip**. The routine takes about 75 seconds: chin tucks, shoulder rolls, a chest opener, and looking far away. The camera checks whether you actually stood up. You can also start one any time with **Stretch Now**.
+
+### Eye care
+
+With **Eye Care** on (Settings), the app also tracks your face:
+- **Distance from the screen**, measured from the size of your iris (about 11.7 mm across in almost everyone). If you're closer than 45 cm for 20 seconds, you get a warning. You can change this under Settings → Too-Close Warning.
+- **Blink rate.** Normal is 15–20 blinks a minute, but staring at a screen often drops it to about 5. If it stays below 8 a minute over 2 minutes, you get a reminder to blink and look 20 feet away for 20 seconds (at most every 20 min).
+
+Both show in the menu and the preview window. The distance assumes a camera with a ~75° horizontal field of view (typical for a MacBook). If it reads consistently high or low, change `CAMERA_HFOV_DEG` in `eyes.py`.
+
+### Timed reminders only
 
 **Timed Reminders Only** turns the camera off completely and just sends a posture reminder at the interval you pick under **Timed Reminder Interval** (5–60 min, default 15). The same interval is used while you're paused or the camera is unavailable.
 
@@ -93,7 +110,7 @@ Flags override the settings saved by the menu bar app, but only for that run.
 | `--tilt` | 8 | Degrees of shoulder tilt allowed |
 | `--break-every` | 45 | Minutes of sitting before a stretch break (0 = off) |
 | `--remind-every` | 15 | Minutes between fallback posture reminders (0 = off) |
-| `--fps` | 8 | Frames analysed per second (lower uses less CPU) |
+| `--fps` | 15 | Frames analysed per second (lower uses less CPU, but under ~12 misses blinks) |
 
 ## Tips for accurate detection
 
