@@ -48,8 +48,8 @@ BLINK_ALERT_EVERY = 1200.0    # at most one eye-break reminder per 20 min
 
 # Slouch alerts get firmer if you ignore them: (title, sound) per level; level 3 also flashes the screen.
 ESCALATION = {
-    1: ("Sit up straight!", "Tink"),
-    2: ("Still slouching", "Funk"),
+    1: ("Sit up straight!", "Funk"),
+    2: ("Still slouching", "Ping"),
     3: ("You've been slouching a while", "Sosumi"),
 }
 
