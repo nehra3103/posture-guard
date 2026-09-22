@@ -19,10 +19,13 @@ import time
 from pathlib import Path
 
 import cv2
+import AppKit
 import rumps
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered, NSColor,
                     NSScreen, NSScreenSaverWindowLevel, NSWindow, NSWindowStyleMaskBorderless)
+from Foundation import NSDistributedNotificationCenter, NSObject
 from PyObjCTools import AppHelper
+import objc
 
 import posture_guard as pg
 import report
@@ -36,7 +39,7 @@ LOG_PATH = Path.home() / "Library" / "Logs" / "PostureGuard.log"
 PREVIEW_WINDOW = "Posture Guard"
 
 ICONS = {"starting": "⚪", "calibrating": "🟡", "good": "🟢", "bad": "🔴",
-         "away": "⚪", "paused": "⏸", "no_camera": "⚠️", "timer": "⏰", "moved": "🟡", "break": "🧘"}
+         "away": "⚪", "paused": "⏸", "no_camera": "⚠️", "timer": "⏰", "moved": "🟡", "break": "🧘", "sleeping": "💤"}
 
 SENSITIVITY = [("Strict", 0.10), ("Normal", 0.15), ("Relaxed", 0.22)]
 FIRST_ALERT = [("5 seconds", 5.0), ("10 seconds", 10.0), ("20 seconds", 20.0), ("30 seconds", 30.0)]
@@ -67,6 +70,38 @@ def osascript_dialog(text, buttons, default, timeout):
             return b
     return ""
 
+# macOS events that mean nobody is at the Mac -> (reason, starts?). Posture Guard sleeps while any reason is active.
+POWER_EVENTS = {
+    "NSWorkspaceWillSleepNotification": ("system", True),
+    "NSWorkspaceDidWakeNotification": ("system", False),
+    "NSWorkspaceScreensDidSleepNotification": ("display", True),
+    "NSWorkspaceScreensDidWakeNotification": ("display", False),
+    "NSWorkspaceSessionDidResignActiveNotification": ("session", True),  # switched to another user
+    "NSWorkspaceSessionDidBecomeActiveNotification": ("session", False),
+    "com.apple.screenIsLocked": ("lock", True),
+    "com.apple.screenIsUnlocked": ("lock", False),
+}
+
+
+class PowerObserver(NSObject):
+    """Forwards sleep/wake/lock notifications to a Python callback (on the main thread)."""
+
+    def initWithCallback_(self, callback):
+        self = objc.super(PowerObserver, self).init()
+        if self is not None:
+            self.callback = callback
+        return self
+
+    def handle_(self, note):
+        self.callback(str(note.name()))
+
+    def register(self):
+        workspace = AppKit.NSWorkspace.sharedWorkspace().notificationCenter()
+        distributed = NSDistributedNotificationCenter.defaultCenter()
+        for name in POWER_EVENTS:
+            center = distributed if name.startswith("com.apple.") else workspace
+            center.addObserver_selector_name_object_(self, "handle:", name, None)
+
 
 class PostureGuardApp(rumps.App):
     def __init__(self):
@@ -93,6 +128,10 @@ class PostureGuardApp(rumps.App):
         self.routine_status = None       # set while a guided stretch is running
         self.dialog_open = False
         self.flash_windows = []
+        self.sleep_reasons = set()
+        self.camera_warned = False
+        self.power_observer = PowerObserver.alloc().initWithCallback_(self.on_power_event)
+        self.power_observer.register()
 
         self.status_item = rumps.MenuItem(self.status)
         self.today_item = rumps.MenuItem("Today: no data yet")
@@ -181,6 +220,8 @@ class PostureGuardApp(rumps.App):
     def camera_worker(self):
         def on_frame(frame, status, color, landmarks):
             self.state, self.status = self.guard.state, status
+            if frame is not None:
+                self.camera_warned = False
             if self.show_preview and frame is not None:
                 self.frame = pg.draw_overlay(frame, status, color, landmarks,
                                              hint="Use the menu bar icon to pause or recalibrate",
@@ -196,11 +237,15 @@ class PostureGuardApp(rumps.App):
             ok = pg.run_camera(self.guard, self.settings, on_frame, stop=self.switch, release_when_paused=True)
             if ok or self.switch.is_set():
                 continue  # stopped on purpose: quitting or switching mode
+            # Camera missing or busy (e.g. still waking up): use timed reminders and retry every 30 s.
             self.state = "no_camera"
             self.status = "Camera unavailable: timed reminders only"
-            pg.notify("Posture Guard can't use the camera",
-                      "Allow it in System Settings > Privacy & Security > Camera, then restart Posture Guard.")
-            while not self.switch.is_set():
+            if not self.camera_warned:
+                self.camera_warned = True
+                pg.notify("Posture Guard can't use the camera",
+                          "Check System Settings > Privacy & Security > Camera. Retrying in the background.")
+            retry_at = time.time() + 30
+            while not self.switch.is_set() and time.time() < retry_at:
                 self.guard._timers(time.time(), tracking=False)
                 self.switch.wait(5)
 
@@ -209,7 +254,9 @@ class PostureGuardApp(rumps.App):
         self.guard.last_posture_reminder = time.time()
         while not self.switch.is_set():
             now = time.time()
-            if self.guard.paused:
+            if self.guard.suspended:
+                self.state, self.status = "sleeping", "Sleeping (Mac asleep or locked)"
+            elif self.guard.paused:
                 self.state, self.status = "paused", "Paused"
                 self.guard.last_posture_reminder = now
             else:
@@ -297,6 +344,25 @@ class PostureGuardApp(rumps.App):
                 message = "Nice work. Your back and eyes thank you."
             pg.notify("Stretch break done", message, sound="Hero")
         threading.Thread(target=run, daemon=True).start()
+
+    def on_power_event(self, name):
+        """Mac going to sleep / locking: stop the camera and all reminders. Back again: resume fresh."""
+        reason, starting = POWER_EVENTS.get(name, (None, None))
+        if reason is None:
+            return
+        if starting:
+            self.sleep_reasons.add(reason)
+        else:
+            self.sleep_reasons.discard(reason)
+            if reason == "system":
+                self.sleep_reasons.discard("display")  # the display wakes with the system
+        was_suspended = self.guard.suspended
+        if self.sleep_reasons and not was_suspended:
+            self.guard.suspended = True
+            print(f"[{time.strftime('%H:%M:%S')}] Sleeping ({', '.join(sorted(self.sleep_reasons))})", flush=True)
+        elif not self.sleep_reasons and was_suspended:
+            self.guard.wake()
+            print(f"[{time.strftime('%H:%M:%S')}] Awake again, resuming", flush=True)
 
     def ask_recalibrate(self):
         """Engine hook (camera thread) when your sitting position looks different from calibration."""

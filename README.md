@@ -44,6 +44,7 @@ Open **Posture Guard** from Spotlight (Cmd+Space). There's no window or Dock ico
 | ⚠️ | Camera unavailable (timed reminders only) |
 | ⏰ | Timed reminders only (camera off) |
 | 🧘 | Guided stretch in progress |
+| 💤 | Mac asleep, display off or screen locked (camera off, no reminders) |
 
 ### Smarter alerts
 
@@ -58,6 +59,10 @@ With **Eye Care** on (Settings), the app also tracks your face:
 - **Blink rate.** Normal is 15–20 blinks a minute, but staring at a screen often drops it to about 5. If it stays below 8 a minute over 2 minutes, you get a reminder to blink and look 20 feet away for 20 seconds (at most every 20 min).
 
 Both show in the menu and the preview window. The distance assumes a camera with a ~75° horizontal field of view (typical for a MacBook). If it reads consistently high or low, change `CAMERA_HFOV_DEG` in `eyes.py`.
+
+### Sleep and lock
+
+When your Mac sleeps, the display turns off, the screen locks, or you switch to another user, Posture Guard turns the camera off and stops all alerts and reminders. When you're back, it resumes and restarts the sitting and reminder timers, so an overdue stretch break doesn't greet you the moment you unlock. A pause you set yourself stays paused. If the camera isn't ready right after wake, it retries every 30 seconds.
 
 ### Timed reminders only
 

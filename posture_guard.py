@@ -216,7 +216,7 @@ class PostureGuard:
         self.calib_samples = []
         self.calib_until = None
         self.recent = deque(maxlen=max(1, int(settings.fps * 1.5)))  # ~1.5s smoothing window
-        self.state = "starting"  # starting | calibrating | good | bad | away | paused | moved | break
+        self.state = "starting"  # starting | calibrating | good | bad | away | paused | moved | break | sleeping
 
         now = time.time()
         self.bad_since = None
@@ -226,7 +226,8 @@ class PostureGuard:
         self.last_seen = now
         self.sitting_since = now
         self.last_posture_reminder = now
-        self.paused = False
+        self.paused = False         # paused by you
+        self.suspended = False      # paused by the system: Mac asleep, display off or screen locked
         self.returned_at = None     # when you came back after being away
         self.moved_since = None     # when your position first looked different from calibration
         self.moved_prompted = False # already asked about this position change
@@ -246,6 +247,21 @@ class PostureGuard:
         self.good_seconds = 0.0
         self.bad_seconds = 0.0
         self.alerts = 0
+
+    @property
+    def idle(self):
+        return self.paused or self.suspended
+
+    def wake(self):
+        """Back from sleep/lock: you were away, so restart the timers instead of catching up."""
+        now = time.time()
+        self.suspended = False
+        self.sitting_since = now
+        self.last_posture_reminder = now
+        self.last_blink_alert = now
+        self.recent.clear()
+        self.bad_since = self.good_since = None
+        self.escalation = 0
 
     # ---- alerts
     def muted(self):
@@ -368,6 +384,9 @@ class PostureGuard:
         """Process one frame (None while paused). Returns (status_text, color, landmarks)."""
         now = time.time()
         dt = min(dt, 2.0)  # don't count a camera hiccup or wake-from-sleep as minutes of posture
+        if self.suspended:
+            self.state = "sleeping"
+            return "Sleeping (Mac asleep or locked)", (200, 200, 200), None
         if self.paused:
             self.state = "paused"
             self._timers(now, tracking=False)
@@ -469,6 +488,8 @@ class PostureGuard:
         return f"{', '.join(problems)} ({slouched_for:.0f}s)", (0, 0, 255), result.pose_landmarks
 
     def _timers(self, now, tracking):
+        if self.suspended:
+            return
         # Fallback reminder: only when the camera can't judge posture for us.
         if not tracking and self.args.remind_every > 0:
             if now - self.last_posture_reminder >= self.args.remind_every * 60:
@@ -593,9 +614,9 @@ def run_camera(guard, settings, on_frame, stop=None, release_when_paused=False):
         while not stopped():
             start = time.time()
 
-            if guard.paused and release_when_paused:
-                cap.release()  # turn the camera (and its green light) off while paused
-                while guard.paused and not stopped():
+            if guard.idle and release_when_paused:
+                cap.release()  # turn the camera (and its green light) off while paused or asleep
+                while guard.idle and not stopped():
                     on_frame(None, *guard.step(None, 0))
                     time.sleep(0.5)
                 cap = open_camera(settings.camera, wait=5)
