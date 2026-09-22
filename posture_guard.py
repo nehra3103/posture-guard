@@ -390,6 +390,8 @@ class PostureGuard:
             faces = self.face_mesh.process(rgb).multi_face_landmarks
             face = faces[0] if faces else None
             self.eyes.update(face, w, h, now)
+            if face is not None and self.history and self.eyes.distance_cm and now >= self.break_until:
+                self.history.record(distance=self.eyes.distance_cm)
 
         if metrics:
             away_for = now - self.last_seen

@@ -81,6 +81,7 @@ Posture Guard records how many seconds you spend upright versus slouched each mi
   - good posture per day for the last 14 days
   - today by hour (upright vs slouched)
   - the hours when you slouch most, from the last 30 days
+  - your average eye-to-screen distance, with ✓ **Good distance** (50 cm or more) or ⚠ **Needs attention**, shown on a 30–90 cm scale with the recommended 50–70 cm range highlighted (needs Eye Care on)
   - a daily table
 
 A **streak** is a run of minutes with no alerts where you were upright at least half the time. Stepping away for up to 5 minutes doesn't break it.

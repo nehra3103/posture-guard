@@ -40,13 +40,13 @@ def gather(history, now=None):
 
     today_rows = by_day.get(midnight, [])
     today_hours = {}
-    for minute, good, bad, _ in today_rows:
+    for minute, good, bad, *_ in today_rows:
         h = datetime.fromtimestamp(minute * 60).hour
         g, b = today_hours.get(h, (0.0, 0.0))
         today_hours[h] = (g + good, b + bad)
 
     hour_of_day = {}
-    for minute, good, bad, _ in rows:
+    for minute, good, bad, *_ in rows:
         h = datetime.fromtimestamp(minute * 60).hour
         g, b = hour_of_day.get(h, (0.0, 0.0))
         hour_of_day[h] = (g + good, b + bad)
@@ -64,6 +64,17 @@ def gather(history, now=None):
 
 
 # ---------------------------------------------------------------- svg helpers
+
+GOOD_DISTANCE = (50, 70)   # recommended eye-to-screen distance in cm (about arm's length)
+SCALE = (30, 90)           # range drawn on the distance scale
+
+CHECK_ICON = ('<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="8" fill="var(--good)"/>'
+              '<path d="M4.6 8.3l2.2 2.2 4.6-4.8" fill="none" stroke="#fff" stroke-width="1.8" '
+              'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+WARN_ICON = ('<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.8l6.6 11.8H1.4z" fill="var(--warning)" '
+             'stroke="var(--warning)" stroke-width="1.6" stroke-linejoin="round"/>'
+             '<path d="M8 6.2v3.4" stroke="#1a1a19" stroke-width="1.6" stroke-linecap="round"/>'
+             '<circle cx="8" cy="11.7" r="0.95" fill="#1a1a19"/></svg>')
 
 W, H = 640, 220
 PAD_L, PAD_R, PAD_T, PAD_B = 40, 8, 12, 28
@@ -90,7 +101,7 @@ def column_chart(labels, series, y_max, y_ticks, y_fmt, tips, label_every=1, cap
     bar_w = min(24, band * 0.6)
     y = lambda v: PAD_T + plot_h - (v / y_max) * plot_h if y_max else PAD_T + plot_h
 
-    out = [f'<svg viewBox="0 0 {W} {H}" role="img" preserveAspectRatio="xMidYMid meet">']
+    out = [f'<svg class="chart" viewBox="0 0 {W} {H}" role="img" preserveAspectRatio="xMidYMid meet">']
     for t in y_ticks:
         ty = y(t)
         out.append(f'<line class="grid" x1="{PAD_L}" x2="{W - PAD_R}" y1="{ty:.1f}" y2="{ty:.1f}"/>')
@@ -139,10 +150,64 @@ def nice_ticks(max_v, count=4):
     return top, [step * i for i in range(int(top / step) + 1)]
 
 
+def distance_scale(value):
+    """A minimal 30–90 cm track with the recommended band shaded and a marker at your average."""
+    sw, sh, pad = 640, 64, 10
+    lo, hi = SCALE
+    x = lambda v: pad + (min(max(v, lo), hi) - lo) / (hi - lo) * (sw - 2 * pad)
+    g0, g1 = GOOD_DISTANCE
+    ty = 26
+    ticks = "".join(f'<text class="tick" x="{x(v):.1f}" y="{sh - 4}" text-anchor="middle">{v}{" cm" if v == hi else ""}</text>'
+                    for v in (lo, g0, g1, hi))
+    return f"""<svg class="chart scale" viewBox="0 0 {sw} {sh}" role="img"
+      aria-label="Average distance {value:.0f} cm; recommended {g0} to {g1} cm">
+      <text class="tick" x="{(x(g0) + x(g1)) / 2:.1f}" y="{ty - 12}" text-anchor="middle">recommended</text>
+      <rect class="track" x="{pad}" y="{ty - 3}" width="{sw - 2 * pad}" height="6" rx="3"/>
+      <rect class="zone" x="{x(g0):.1f}" y="{ty - 3}" width="{x(g1) - x(g0):.1f}" height="6" rx="3"/>
+      <g class="col" tabindex="0" data-tip="Average {value:.0f} cm · recommended {g0}–{g1} cm">
+        <circle class="hit" cx="{x(value):.1f}" cy="{ty}" r="14"/>
+        <circle class="marker" cx="{x(value):.1f}" cy="{ty}" r="7"/>
+      </g>
+      {ticks}
+    </svg>"""
+
+
+def distance_card(today, week):
+    head = '<div class="card-head"><h2>Eye-to-screen distance</h2>{badge}</div>'
+    if today["distance"] is not None:
+        value, period = today["distance"], "average today"
+    else:
+        value, period = week["distance"], "average, last 7 days"
+    if value is None:
+        return (f'<section class="card" id="distance">{head.format(badge="")}'
+                '<p class="empty">No distance data yet. Turn on <strong>Eye Care</strong> under Settings '
+                'in the menu bar.</p></section>')
+
+    good = value >= GOOD_DISTANCE[0]
+    badge = (f'<span class="badge good">{CHECK_ICON}Good distance</span>' if good else
+             f'<span class="badge warn">{WARN_ICON}Needs attention</span>')
+    note = ("You're keeping about an arm's length from the screen. Keep it up." if good else
+            f"You're sitting closer than {GOOD_DISTANCE[0]} cm on average. Sit back, or push your screen back, "
+            "to about arm's length.")
+    if today["distance"] is not None and week["distance"] is not None:
+        note += f' <span class="muted">Last 7 days: {week["distance"]:.0f} cm.</span>'
+    return f"""<section class="card" id="distance">
+      {head.format(badge=badge)}
+      <div class="metric"><span class="num">{value:.0f}</span><span class="unit">cm</span>
+        <span class="period">{period}</span></div>
+      {distance_scale(value)}
+      <p class="note">{note}</p>
+    </section>"""
+
+
 # ---------------------------------------------------------------- page
 
 def pct(v):
     return "–" if v is None else f"{v:.0f}%"
+
+
+def cm(v):
+    return "–" if v is None else f"{v:.0f} cm"
 
 
 def build_html(data):
@@ -212,7 +277,8 @@ def build_html(data):
     # Table view
     table_rows = "\n".join(
         f"<tr><td>{d.strftime('%a %-d %b')}</td><td>{pct(s['percent'])}</td>"
-        f"<td>{fmt_duration(s['good'] + s['bad'])}</td><td>{s['alerts']}</td><td>{s['streak']} min</td></tr>"
+        f"<td>{fmt_duration(s['good'] + s['bad'])}</td><td>{s['alerts']}</td><td>{s['streak']} min</td>"
+        f"<td>{cm(s['distance'])}</td></tr>"
         for d, s in reversed(days))
 
     body = f"""
@@ -226,6 +292,7 @@ def build_html(data):
       <div class="sub">{fmt_duration(today["good"])} upright · {fmt_duration(today["bad"])} slouched</div>
     </section>
     {tiles}
+    {distance_card(today, week)}
     <section class="card" id="days">
       <h2>Good posture, last 14 days</h2>
       <p class="sub">Share of tracked time spent sitting upright</p>
@@ -244,7 +311,7 @@ def build_html(data):
     </section>
     <details class="card">
       <summary>Daily table</summary>
-      <table><thead><tr><th>Day</th><th>Good posture</th><th>Tracked</th><th>Alerts</th><th>Best streak</th></tr></thead>
+      <table><thead><tr><th>Day</th><th>Good posture</th><th>Tracked</th><th>Alerts</th><th>Best streak</th><th>Avg distance</th></tr></thead>
       <tbody>{table_rows}</tbody></table>
     </details>
     """
@@ -266,6 +333,7 @@ PAGE = """<!doctype html>
   --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
   --grid: #e1e0d9; --axis: #c3c2b7; --good-text: #006300; --bad-text: #b3261e;
   --series-1: #2a78d6; --series-2: #eb6834;
+  --good: #0ca30c; --warning: #fab219; --warn-text: #8a5a00; --zone-opacity: 0.45;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -274,6 +342,7 @@ PAGE = """<!doctype html>
     --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --good-text: #0ca30c; --bad-text: #e66767;
     --series-1: #3987e5; --series-2: #d95926;
+    --good: #0ca30c; --warning: #fab219; --warn-text: #fab219; --zone-opacity: 0.7;
   }
 }
 :root[data-theme="dark"] {
@@ -282,6 +351,7 @@ PAGE = """<!doctype html>
   --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
   --grid: #2c2c2a; --axis: #383835; --good-text: #0ca30c; --bad-text: #e66767;
   --series-1: #3987e5; --series-2: #d95926;
+  --good: #0ca30c; --warning: #fab219; --warn-text: #fab219; --zone-opacity: 0.7;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text-primary);
@@ -302,7 +372,22 @@ header { margin-bottom: 24px; }
 .delta { font-size: 12px; margin-top: 4px; color: var(--text-secondary); }
 .delta.up { color: var(--good-text); } .delta.down { color: var(--bad-text); }
 .card { padding: 18px 18px 12px; margin-bottom: 16px; }
-.card svg { width: 100%; height: auto; display: block; margin-top: 10px; overflow: visible; }
+.card svg.chart { width: 100%; height: auto; display: block; margin-top: 10px; overflow: visible; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600;
+         padding: 4px 10px 4px 6px; border-radius: 999px; }
+.badge.good { color: var(--good-text); background: color-mix(in srgb, var(--good) 12%, transparent); }
+.badge.warn { color: var(--warn-text); background: color-mix(in srgb, var(--warning) 16%, transparent); }
+.ico { width: 16px; height: 16px; flex: none; }
+.metric { display: flex; align-items: baseline; gap: 4px; margin-top: 10px; }
+.metric .num { font-size: 40px; font-weight: 650; line-height: 1; }
+.metric .unit { font-size: 18px; font-weight: 600; color: var(--text-secondary); }
+.metric .period { font-size: 13px; color: var(--text-secondary); margin-left: 8px; }
+.scale .track { fill: var(--grid); }
+.scale .zone { fill: var(--good); opacity: var(--zone-opacity); }
+.scale .marker { fill: var(--text-primary); stroke: var(--surface-1); stroke-width: 2; }
+.scale .hit { fill: transparent; }
+.muted { color: var(--muted); }
 .grid { stroke: var(--grid); stroke-width: 1; }
 .axis { stroke: var(--axis); stroke-width: 1; }
 .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }

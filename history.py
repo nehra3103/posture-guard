@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta
 
 STREAK_GAP_MINUTES = 5  # being away longer than this ends a streak
+MIN_DISTANCE_SAMPLES = 150  # ~10 s of face tracking before an average distance means anything
 
 
 def local_midnight(day=None):
@@ -19,10 +20,10 @@ def good_minute(good, bad, alerts):
 
 
 def best_streak(rows):
-    """Longest run of good minutes. rows: (minute, good, bad, alerts) sorted by minute."""
+    """Longest run of good minutes. rows: (minute, good, bad, alerts, ...) sorted by minute."""
     best = run = 0
     last = None
-    for minute, good, bad, alerts in rows:
+    for minute, good, bad, alerts, *_ in rows:
         if good + bad < 10:
             continue  # barely tracked; neither extends nor breaks a streak
         if last is not None and minute - last > STREAK_GAP_MINUTES:
@@ -41,13 +42,19 @@ class History:
                                minute INTEGER PRIMARY KEY,  -- unix time // 60
                                good   REAL NOT NULL DEFAULT 0,
                                bad    REAL NOT NULL DEFAULT 0,
-                               alerts INTEGER NOT NULL DEFAULT 0)""")
+                               alerts INTEGER NOT NULL DEFAULT 0,
+                               dist_sum REAL NOT NULL DEFAULT 0,  -- eye-to-screen distance samples (cm)
+                               dist_n INTEGER NOT NULL DEFAULT 0)""")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(minutes)")}
+        for col, kind in (("dist_sum", "REAL"), ("dist_n", "INTEGER")):  # databases from older versions
+            if col not in columns:
+                self.db.execute(f"ALTER TABLE minutes ADD COLUMN {col} {kind} NOT NULL DEFAULT 0")
         self.db.commit()
         self.lock = threading.Lock()
-        self.pending = None  # [minute, good, bad, alerts] not yet written
+        self.pending = None  # [minute, good, bad, alerts, dist_sum, dist_n] not yet written
 
     # ---- writing
-    def record(self, good=0.0, bad=0.0, alerts=0):
+    def record(self, good=0.0, bad=0.0, alerts=0, distance=None):
         minute = int(time.time() // 60)
         with self.lock:
             if self.db is None:
@@ -55,17 +62,22 @@ class History:
             if self.pending and self.pending[0] != minute:
                 self._flush()
             if not self.pending:
-                self.pending = [minute, 0.0, 0.0, 0]
+                self.pending = [minute, 0.0, 0.0, 0, 0.0, 0]
             self.pending[1] += good
             self.pending[2] += bad
             self.pending[3] += alerts
+            if distance is not None:
+                self.pending[4] += distance
+                self.pending[5] += 1
 
     def _flush(self):
         if not self.pending:
             return
-        self.db.execute("""INSERT INTO minutes VALUES (?, ?, ?, ?)
+        self.db.execute("""INSERT INTO minutes (minute, good, bad, alerts, dist_sum, dist_n)
+                           VALUES (?, ?, ?, ?, ?, ?)
                            ON CONFLICT(minute) DO UPDATE SET good = good + excluded.good,
-                               bad = bad + excluded.bad, alerts = alerts + excluded.alerts""",
+                               bad = bad + excluded.bad, alerts = alerts + excluded.alerts,
+                               dist_sum = dist_sum + excluded.dist_sum, dist_n = dist_n + excluded.dist_n""",
                         self.pending)
         self.db.commit()
         self.pending = None
@@ -80,23 +92,23 @@ class History:
 
     # ---- reading
     def rows(self, start, end=None):
-        """(minute, good, bad, alerts) between two datetimes, including unsaved data."""
+        """(minute, good, bad, alerts, dist_sum, dist_n) between two datetimes, including unsaved data."""
         lo = int(start.timestamp() // 60)
         hi = int((end or datetime.now() + timedelta(days=1)).timestamp() // 60)
         with self.lock:
-            rows = self.db.execute("SELECT minute, good, bad, alerts FROM minutes "
+            rows = self.db.execute("SELECT minute, good, bad, alerts, dist_sum, dist_n FROM minutes "
                                    "WHERE minute >= ? AND minute < ? ORDER BY minute", (lo, hi)).fetchall()
             if self.pending and lo <= self.pending[0] < hi:
                 p = self.pending
                 if rows and rows[-1][0] == p[0]:
-                    m, g, b, a = rows.pop()
-                    rows.append((m, g + p[1], b + p[2], a + p[3]))
+                    last = rows.pop()
+                    rows.append((p[0],) + tuple(x + y for x, y in zip(last[1:], p[1:])))
                 else:
                     rows.append(tuple(p))
         return rows
 
     def today(self):
-        """Totals for today: dict(good, bad, alerts, streak, percent)."""
+        """Totals for today: dict(good, bad, alerts, streak, percent, distance)."""
         rows = self.rows(local_midnight())
         return summarize(rows)
 
@@ -105,12 +117,14 @@ def summarize(rows):
     good = sum(r[1] for r in rows)
     bad = sum(r[2] for r in rows)
     total = good + bad
+    dist_n = sum(r[5] for r in rows)
     return {
         "good": good,
         "bad": bad,
         "alerts": sum(r[3] for r in rows),
         "streak": best_streak(rows),
         "percent": None if total < 30 else 100 * good / total,
+        "distance": sum(r[4] for r in rows) / dist_n if dist_n >= MIN_DISTANCE_SAMPLES else None,
     }
 
 
