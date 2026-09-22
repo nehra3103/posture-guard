@@ -43,11 +43,25 @@ Open **Posture Guard** from Spotlight (Cmd+Space). There's no window or Dock ico
 | ⏸ | Paused (camera off) |
 | ⚠️ | Camera unavailable (timer reminders only) |
 
-Click the icon to see this session's stats, pause (for calls), recalibrate, show the camera preview, change sensitivity and alert timing, turn stretch breaks on or off, and toggle **Start at Login**. Settings you change there are remembered.
+Click the icon to see today's stats, open the progress report, pause (for calls), recalibrate, show the camera preview, change sensitivity and alert timing, turn stretch breaks on or off, and toggle **Start at Login**. Settings you change there are remembered.
 
 The first launch asks for camera permission for "Posture Guard". Logs are written to `~/Library/Logs/PostureGuard.log`. To remove the app and the start-at-login entry, run `.venv/bin/python menubar.py --uninstall`.
 
 If you move the project folder, run `--install` again, because the app points to this folder.
+
+## Progress tracking
+
+Posture Guard records how many seconds you spend upright versus slouched each minute, plus the alerts, in a local database. Nothing leaves your Mac.
+
+- **In the menu:** today's good-posture percentage, time tracked, best streak and alert count.
+- **Progress report** (menu → *Open Progress Report…*, or `.venv/bin/python report.py`): a page in your browser with
+  - today's score and a comparison of the last 7 days with the week before
+  - good posture per day for the last 14 days
+  - today by hour (upright vs slouched)
+  - the hours when you slouch most, from the last 30 days
+  - a daily table
+
+A **streak** is a run of minutes with no alerts where you were upright at least half the time. Stepping away for up to 5 minutes doesn't break it.
 
 ## Terminal mode
 
@@ -85,5 +99,6 @@ Flags override the settings saved by the menu bar app, but only for that run.
 ## Where things are saved
 
 - Settings and calibration: `~/Library/Application Support/PostureGuard/config.json`
+- Posture history: `~/Library/Application Support/PostureGuard/history.db` (delete it to reset your stats)
 - The app launcher: `~/Applications/Posture Guard.app`
 - Start at login: `~/Library/LaunchAgents/com.postureguard.menubar.plist`

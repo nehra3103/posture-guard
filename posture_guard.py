@@ -20,11 +20,14 @@ from types import SimpleNamespace
 import cv2
 import mediapipe as mp
 
+from history import History
+
 PL = mp.solutions.pose.PoseLandmark
 REQUIRED = (PL.LEFT_EAR, PL.RIGHT_EAR, PL.LEFT_SHOULDER, PL.RIGHT_SHOULDER)
 
 CONFIG_DIR = Path.home() / "Library" / "Application Support" / "PostureGuard"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+HISTORY_FILE = CONFIG_DIR / "history.db"
 
 DEFAULTS = {
     "camera": None,        # None = pick the Mac's built-in camera
@@ -157,8 +160,9 @@ def save_baseline(baseline, camera):
 # ---------------------------------------------------------------- engine
 
 class PostureGuard:
-    def __init__(self, settings, baseline=None, on_calibrated=None):
+    def __init__(self, settings, baseline=None, on_calibrated=None, history=None):
         self.args = settings
+        self.history = history
         self.pose = mp.solutions.pose.Pose(model_complexity=0,
                                            min_detection_confidence=0.5,
                                            min_tracking_confidence=0.5)
@@ -213,6 +217,7 @@ class PostureGuard:
     def step(self, frame, dt):
         """Process one frame (None while paused). Returns (status_text, color, landmarks)."""
         now = time.time()
+        dt = min(dt, 2.0)  # don't count a camera hiccup or wake-from-sleep as minutes of posture
         if self.paused:
             self.state = "paused"
             self._timers(now, tracking=False)
@@ -250,16 +255,22 @@ class PostureGuard:
             self.state = "good"
             self.bad_since = None
             self.good_seconds += dt
+            if self.history:
+                self.history.record(good=dt)
             return "Good posture", (0, 200, 0), result.pose_landmarks
 
         self.state = "bad"
         self.bad_seconds += dt
+        if self.history:
+            self.history.record(bad=dt)
         self.bad_since = self.bad_since or now
         slouched_for = now - self.bad_since
         if slouched_for >= self.args.grace and now - self.last_alert >= self.args.cooldown:
             notify("Sit up straight!", ", ".join(problems))
             self.last_alert = now
             self.alerts += 1
+            if self.history:
+                self.history.record(alerts=1)
         return f"{', '.join(problems)} ({slouched_for:.0f}s)", (0, 0, 255), result.pose_landmarks
 
     def _timers(self, now, tracking):
@@ -464,7 +475,8 @@ def main():
         settings.camera = pick_default_camera()
     cam = camera_name(settings.camera) if not args.no_camera else None
     baseline = None if args.recalibrate else load_baseline(cfg, cam)
-    guard = PostureGuard(settings, baseline, on_calibrated=lambda b: save_baseline(b, cam))
+    history = History(HISTORY_FILE)
+    guard = PostureGuard(settings, baseline, on_calibrated=lambda b: save_baseline(b, cam), history=history)
 
     def on_frame(frame, status, color, landmarks):
         if not args.preview:
@@ -491,6 +503,7 @@ def main():
         pass
     finally:
         cv2.destroyAllWindows()
+        history.close()
     print("\n" + guard.summary())
 
 

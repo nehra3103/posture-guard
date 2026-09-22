@@ -22,6 +22,8 @@ import rumps
 from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
 
 import posture_guard as pg
+import report
+from history import History, fmt_duration
 
 PROJECT_DIR = Path(__file__).resolve().parent
 APP_PATH = Path.home() / "Applications" / "Posture Guard.app"
@@ -48,8 +50,11 @@ class PostureGuardApp(rumps.App):
         if self.settings.camera is None:
             self.settings.camera = pg.pick_default_camera()
         self.camera = pg.camera_name(self.settings.camera)
+        self.history = History(pg.HISTORY_FILE)
         self.guard = pg.PostureGuard(self.settings, pg.load_baseline(cfg, self.camera),
-                                     on_calibrated=lambda b: pg.save_baseline(b, self.camera))
+                                     on_calibrated=lambda b: pg.save_baseline(b, self.camera),
+                                     history=self.history)
+        self.today_checked = 0.0
 
         self.state = "starting"
         self.status = "Starting camera…"
@@ -58,7 +63,8 @@ class PostureGuardApp(rumps.App):
         self.stop = threading.Event()
 
         self.status_item = rumps.MenuItem(self.status)
-        self.stats_item = rumps.MenuItem(self.guard.summary())
+        self.today_item = rumps.MenuItem("Today: no data yet")
+        self.streak_item = rumps.MenuItem("")
         self.pause_item = rumps.MenuItem("Pause", callback=self.toggle_pause)
         self.preview_item = rumps.MenuItem("Show Camera Preview", callback=self.toggle_preview)
         self.login_item = rumps.MenuItem("Start at Login", callback=self.toggle_login)
@@ -66,7 +72,10 @@ class PostureGuardApp(rumps.App):
 
         self.menu = [
             self.status_item,
-            self.stats_item,
+            None,
+            self.today_item,
+            self.streak_item,
+            rumps.MenuItem("Open Progress Report…", callback=self.open_report),
             None,
             self.pause_item,
             rumps.MenuItem("Recalibrate (sit up straight)", callback=self.recalibrate),
@@ -129,10 +138,16 @@ class PostureGuardApp(rumps.App):
     def refresh_menu(self, _):
         self.title = ICONS.get(self.state, "⚪")
         self.status_item.title = self.status
-        pct = self.guard.good_percent()
-        self.stats_item.title = ("This session: no data yet" if pct is None else
-                                 f"This session: {pct:.0f}% good posture, {self.guard.alerts} alert(s)")
         self.pause_item.title = "Resume" if self.guard.paused else "Pause"
+        if time.time() - self.today_checked >= 10:
+            self.today_checked = time.time()
+            t = self.history.today()
+            if t["percent"] is None:
+                self.today_item.title, self.streak_item.title = "Today: no data yet", ""
+            else:
+                self.today_item.title = (f"Today: {t['percent']:.0f}% good posture · "
+                                         f"{fmt_duration(t['good'] + t['bad'])} tracked")
+                self.streak_item.title = f"Best streak {t['streak']} min · {t['alerts']} alert(s)"
 
     def refresh_preview(self, _):
         if not self.show_preview:
@@ -147,6 +162,9 @@ class PostureGuardApp(rumps.App):
             pass
 
     # ---- menu actions
+    def open_report(self, _):
+        report.open_report(self.history, pg.CONFIG_DIR)
+
     def toggle_pause(self, _):
         self.guard.paused = not self.guard.paused
 
@@ -173,6 +191,8 @@ class PostureGuardApp(rumps.App):
     def quit(self, _):
         self.stop.set()
         cv2.destroyAllWindows()
+        time.sleep(0.3)  # let the camera thread finish its current frame
+        self.history.close()
         rumps.quit_application()
 
 
