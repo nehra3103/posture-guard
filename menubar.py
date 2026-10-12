@@ -32,7 +32,10 @@ import report
 from history import History, fmt_duration
 
 PROJECT_DIR = Path(__file__).resolve().parent
-APP_PATH = Path.home() / "Applications" / "Posture Guard.app"
+# True inside the standalone app built by build_app.sh; the bundle is then the app itself.
+FROZEN = getattr(sys, "frozen", False)
+APP_PATH = (Path(sys.executable).resolve().parents[2] if FROZEN
+            else Path.home() / "Applications" / "Posture Guard.app")
 AGENT_LABEL = "com.postureguard.menubar"
 AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
 LOG_PATH = Path.home() / "Library" / "Logs" / "PostureGuard.log"
@@ -452,7 +455,7 @@ class PostureGuardApp(rumps.App):
         if item.state:
             AGENT_PATH.unlink(missing_ok=True)
         else:
-            if not APP_PATH.exists():
+            if not FROZEN and not APP_PATH.exists():
                 build_app()
             install_login_agent()
         item.state = AGENT_PATH.exists()
@@ -528,6 +531,10 @@ def main():
     p.add_argument("--uninstall", action="store_true", help="remove the app and start-at-login entry")
     args = p.parse_args()
 
+    if FROZEN:
+        # Launched from Finder there's no terminal, so keep a log like the launcher app does.
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = open(LOG_PATH, "a", buffering=1)
     if args.install:
         build_app()
         print("Open it from Spotlight (Cmd+Space, 'Posture Guard') or Finder > Applications.")

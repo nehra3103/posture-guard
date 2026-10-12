@@ -1,8 +1,25 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="Posture Guard icon"></p>
+
 # Posture Guard
 
-Sitting at a computer all day leads to forward head posture ("tech neck") and rounded shoulders. Posture Guard watches through your webcam and sends a notification when you start slouching. It also reminds you to take stretch breaks.
+Sitting at a computer all day leads to forward head posture ("tech neck") and rounded shoulders. Posture Guard is a macOS menu bar app that watches through your webcam and sends a notification when you start slouching. It also reminds you to take stretch breaks, keeps an eye on how close you sit to the screen and how often you blink, and shows your progress over time.
 
 Everything runs locally on your machine. No video is saved or uploaded.
+
+<p align="center"><img src="docs/report.png" width="720" alt="The progress report: good-posture score, eye-to-screen distance and a 14-day chart"></p>
+
+## Download
+
+1. Download the `.dmg` from the [latest release](https://github.com/nehra3103/posture-guard/releases/latest). It's built for Macs with Apple silicon (M1 or later) running macOS 11 or newer.
+2. Open it and drag **Posture Guard** into **Applications**.
+3. Open Posture Guard from Applications. Because the app isn't signed with a paid Apple Developer ID, macOS blocks it the first time:
+   - **macOS 15 (Sequoia) and later:** click **Done**, then go to **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to the Posture Guard message.
+   - **macOS 14 and earlier:** right-click the app, choose **Open**, then click **Open** again.
+4. Click **Allow** when it asks for the camera, then sit up straight for 4 seconds while it calibrates.
+
+There's no window. Look for the 🟢 icon in your menu bar.
+
+On an Intel Mac, [build it yourself](#building-the-app-yourself), or follow [Setup](#setup) to run it from source.
 
 ## How it works
 
@@ -20,6 +37,8 @@ Everything runs locally on your machine. No video is saved or uploaded.
    - A **posture check** reminder every 15 minutes (adjustable), but only when the camera isn't tracking (Timed Reminders Only mode, paused, `--no-camera`, or camera unavailable).
 
 ## Setup
+
+To run from source instead of the downloaded app (needs Python 3.9 or newer):
 
 ```bash
 python3 -m venv .venv
@@ -76,6 +95,18 @@ The first launch asks for camera permission for "Posture Guard". Logs are writte
 
 If you move the project folder, run `--install` again, because the app points to this folder.
 
+## Building the app yourself
+
+```bash
+./build_app.sh
+```
+
+This bundles Python and every library into `dist/Posture Guard.app` and wraps it in `dist/PostureGuard-<version>-<arch>.dmg`, ready to share. The app is built for the architecture of the Mac you build on. Bump the version in `VERSION` before building a new release.
+
+- `packaging/PostureGuard.spec`: the PyInstaller recipe (what's bundled, the icon and the Info.plist).
+- `packaging/make_icon.py`: draws the app icon.
+- `packaging/demo_screenshot.py`: regenerates `docs/report.png` from sample data (needs Google Chrome), so your real history stays private.
+
 ## Progress tracking
 
 Posture Guard records how many seconds you spend upright versus slouched each minute, plus the alerts, in a local database. Nothing leaves your Mac.
@@ -128,5 +159,6 @@ Flags override the settings saved by the menu bar app, but only for that run.
 
 - Settings and calibration: `~/Library/Application Support/PostureGuard/config.json`
 - Posture history: `~/Library/Application Support/PostureGuard/history.db` (delete it to reset your stats)
-- The app launcher: `~/Applications/Posture Guard.app`
+- The app launcher (from source): `~/Applications/Posture Guard.app`
+- Log: `~/Library/Logs/PostureGuard.log`
 - Start at login: `~/Library/LaunchAgents/com.postureguard.menubar.plist`
